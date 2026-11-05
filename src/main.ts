@@ -1,5 +1,4 @@
 import { GUI } from 'dat.gui';
-import Stats from 'stats.js';
 import computeShader from './shaders/boids.wgsl?raw';
 import renderShader from './shaders/boids_render.wgsl?raw';
 
@@ -37,9 +36,7 @@ const context = canvas.getContext('webgpu')!;
 const format = navigator.gpu.getPreferredCanvasFormat();
 context.configure({ device, format, alphaMode: 'opaque' });
 
-const stats = new Stats();
-stats.showPanel(0);
-document.body.appendChild(stats.dom);
+const fpsCounter = document.getElementById('fpsCounter')!;
 const controls = { boidCount: DEFAULT_BOIDS };
 const gui = new GUI();
 
@@ -180,10 +177,22 @@ class BoidsApp {
 
 const app = new BoidsApp();
 gui.add(controls, 'boidCount', 1, MAX_BOIDS, 1).name('Boid count').onFinishChange((count: number) => app.reset(count));
-function animate(): void {
-    stats.begin();
+let measuredFrames = 0;
+let measurementStart = performance.now();
+
+async function animate(): Promise<void> {
     app.frame();
-    stats.end();
-    requestAnimationFrame(animate);
+    // A frame is counted only after this submission has completed on the GPU.
+    // This prevents the mobile counter from reporting queued JavaScript frames.
+    await device.queue.onSubmittedWorkDone();
+    measuredFrames++;
+    const now = performance.now();
+    const elapsed = now - measurementStart;
+    if (elapsed >= 500) {
+        fpsCounter.textContent = `${(measuredFrames * 1000 / elapsed).toFixed(1)} FPS`;
+        measuredFrames = 0;
+        measurementStart = now;
+    }
+    requestAnimationFrame(() => { void animate(); });
 }
-requestAnimationFrame(animate);
+requestAnimationFrame(() => { void animate(); });
