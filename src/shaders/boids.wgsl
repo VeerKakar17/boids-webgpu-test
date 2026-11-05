@@ -190,14 +190,14 @@ fn addNeighbor(boidIndex: u32, neighbor: u32, position: vec3<f32>, center: ptr<f
     if (neighbor == boidIndex) { return; }
     let otherPosition = sortedBoids[neighbor].position.xyz;
     let delta = otherPosition - position;
-    let distanceSquared = dot(delta, delta);
-    if (distanceSquared < 25.0) { *center = *center + otherPosition; *count1 = *count1 + 1u; }
-    if (distanceSquared < 9.0) { *separation = *separation - delta; }
-    if (distanceSquared < 25.0) { *velocity = *velocity + sortedBoids[neighbor].velocity.xyz; *count3 = *count3 + 1u; }
+    // Keep the three distance checks separate to match the CUDA helper.
+    if (length(delta) < 5.0) { *center = *center + otherPosition; *count1 = *count1 + 1u; }
+    if (length(delta) < 3.0) { *separation = *separation - delta; }
+    if (length(delta) < 5.0) { *velocity = *velocity + sortedBoids[neighbor].velocity.xyz; *count3 = *count3 + 1u; }
 }
 
 @compute @workgroup_size(256)
-fn update(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn updateVelocity(@builtin(global_invocation_id) gid: vec3<u32>) {
     let index = gid.x;
     if (index >= settings.count) { return; }
     let boid = sortedBoids[index];
@@ -224,14 +224,25 @@ fn update(@builtin(global_invocation_id) gid: vec3<u32>) {
             addNeighbor(index, neighbor, position, &center, &centerCount, &separation, &averageVelocity, &velocityCount);
         }
     }
-    var velocity = boid.velocity.xyz + separation * 0.1;
-    if (centerCount != 0u) { velocity = velocity + (center / f32(centerCount) - position) * 0.01; }
-    if (velocityCount != 0u) { velocity = velocity + averageVelocity / f32(velocityCount) * 0.1; }
+    var rule1 = vec3<f32>(0.0);
+    var rule3 = vec3<f32>(0.0);
+    if (centerCount != 0u) { rule1 = (center / f32(centerCount) - position) * 0.01; }
+    if (velocityCount != 0u) { rule3 = averageVelocity / f32(velocityCount) * 0.1; }
+    let rule2 = separation * 0.1;
+    var velocity = boid.velocity.xyz + rule1 + rule2 + rule3;
     let speed = length(velocity);
     if (speed > 1.0) { velocity = velocity / speed; }
-    var newPosition = position + velocity * 0.2;
+    next[index] = Boid(vec4<f32>(position, 1.0), vec4<f32>(velocity, 0.0));
+}
+
+@compute @workgroup_size(256)
+fn updatePosition(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let index = gid.x;
+    if (index >= settings.count) { return; }
+    let velocity = next[index].velocity.xyz;
+    var newPosition = next[index].position.xyz + velocity * 0.2;
     newPosition = select(newPosition, vec3<f32>(SCENE_SCALE), newPosition < vec3<f32>(-SCENE_SCALE));
     newPosition = select(newPosition, vec3<f32>(-SCENE_SCALE), newPosition > vec3<f32>(SCENE_SCALE));
-    next[index] = Boid(vec4<f32>(newPosition, 1.0), vec4<f32>(velocity, 0.0));
+    next[index].position = vec4<f32>(newPosition, 1.0);
 }
 

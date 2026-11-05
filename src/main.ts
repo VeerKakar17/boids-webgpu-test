@@ -36,65 +36,16 @@ const context = canvas.getContext('webgpu')!;
 const format = navigator.gpu.getPreferredCanvasFormat();
 context.configure({ device, format, alphaMode: 'opaque' });
 
-const cameraBuffer = makeBuffer('camera transform', 64, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-let phi = -0.70;
-let theta = 1.22;
-let zoom = 4.0;
+const cameraBuffer = makeBuffer('camera orbit', 16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+let phi = 0;
+let theta = 0;
+let zoom = 6.0;
 let dragButton: number | undefined;
 let lastPointerX = 0;
 let lastPointerY = 0;
 
-function cross(a: readonly number[], b: readonly number[]): [number, number, number] {
-    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-}
-
-function normalize(v: readonly number[]): [number, number, number] {
-    const length = Math.hypot(v[0], v[1], v[2]);
-    return [v[0] / length, v[1] / length, v[2] / length];
-}
-
-function multiplyMat4(a: Float32Array, b: Float32Array): Float32Array {
-    const output = new Float32Array(16);
-    for (let column = 0; column < 4; column++) {
-        for (let row = 0; row < 4; row++) {
-            output[column * 4 + row] = a[row] * b[column * 4]
-                + a[4 + row] * b[column * 4 + 1]
-                + a[8 + row] * b[column * 4 + 2]
-                + a[12 + row] * b[column * 4 + 3];
-        }
-    }
-    return output;
-}
-
 function updateCamera(): void {
-    const eye: [number, number, number] = [
-        zoom * Math.sin(phi) * Math.sin(theta),
-        zoom * Math.cos(phi) * Math.sin(theta),
-        zoom * Math.cos(theta),
-    ];
-    const forward = normalize(eye);
-    const right = normalize(cross([0, 0, 1], forward));
-    const up = cross(forward, right);
-    const view = new Float32Array([
-        right[0], up[0], forward[0], 0,
-        right[1], up[1], forward[1], 0,
-        right[2], up[2], forward[2], 0,
-        -(right[0] * eye[0] + right[1] * eye[1] + right[2] * eye[2]),
-        -(up[0] * eye[0] + up[1] * eye[1] + up[2] * eye[2]),
-        -(forward[0] * eye[0] + forward[1] * eye[1] + forward[2] * eye[2]),
-        1,
-    ]);
-    const f = 1 / Math.tan(Math.PI / 8);
-    const near = 0.1;
-    const far = 10;
-    const projection = new Float32Array([
-        f / (WIDTH / HEIGHT), 0, 0, 0,
-        0, f, 0, 0,
-        0, 0, (far + near) / (near - far), -1,
-        0, 0, 2 * far * near / (near - far), 0,
-    ]);
-    const viewProjection = multiplyMat4(projection, view);
-    device.queue.writeBuffer(cameraBuffer, 0, viewProjection.buffer as ArrayBuffer);
+    device.queue.writeBuffer(cameraBuffer, 0, new Float32Array([phi, theta, zoom, 0]));
 }
 
 canvas.addEventListener('contextmenu', event => event.preventDefault());
@@ -116,18 +67,24 @@ window.addEventListener('mousemove', event => {
     const deltaY = (event.clientY - lastPointerY) / bounds.height;
     if (dragButton === 0) {
         phi += deltaX;
-        theta = Math.max(0.01, Math.min(Math.PI, theta - deltaY));
+        theta = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, theta - deltaY));
     } else {
-        zoom = Math.max(0.1, Math.min(5.0, zoom + deltaY));
+        zoom = Math.max(0.25, Math.min(12.0, zoom + deltaY * 2.0));
     }
     lastPointerX = event.clientX;
     lastPointerY = event.clientY;
     updateCamera();
 });
+canvas.addEventListener('wheel', event => {
+    event.preventDefault();
+    zoom = Math.max(0.25, Math.min(12.0, zoom + event.deltaY * 0.003));
+    updateCamera();
+}, { passive: false });
 updateCamera();
 
 const fpsCounter = document.getElementById('fpsCounter')!;
 const boidCounter = document.getElementById('boidCounter')!;
+const integrityCounter = document.getElementById('integrityCounter')!;
 const controls = { boidCount: DEFAULT_BOIDS };
 const gui = new GUI();
 
@@ -149,13 +106,14 @@ class BoidsApp {
     private readonly boidsA = makeBuffer('boids A', MAX_SORT_SIZE * 32, GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX);
     private readonly boidsB = makeBuffer('boids B', MAX_SORT_SIZE * 32, GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX);
     private readonly reordered = makeBuffer('cell-coherent boids', MAX_SORT_SIZE * 32, GPUBufferUsage.STORAGE);
-    private readonly pairsA = makeBuffer('radix pairs A', MAX_SORT_SIZE * 8, GPUBufferUsage.STORAGE);
+    private readonly pairsA = makeBuffer('radix pairs A', MAX_SORT_SIZE * 8, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
     private readonly pairsB = makeBuffer('radix pairs B', MAX_SORT_SIZE * 8, GPUBufferUsage.STORAGE);
     private readonly bits = makeBuffer('radix bits', MAX_SORT_SIZE * 4, GPUBufferUsage.STORAGE);
     private readonly scan = makeBuffer('radix scan', MAX_SORT_SIZE * 4, GPUBufferUsage.STORAGE);
     private readonly cellStart = makeBuffer('cell starts', GRID_CELLS * 4, GPUBufferUsage.STORAGE);
     private readonly cellEnd = makeBuffer('cell ends', GRID_CELLS * 4, GPUBufferUsage.STORAGE);
     private readonly blockSums = makeBuffer('scan block sums', MAX_SCAN_BLOCK_COUNT * 4, GPUBufferUsage.STORAGE);
+    private readonly validationReadback = makeBuffer('radix validation readback', MAX_SORT_SIZE * 8, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
     private readonly computeLayout: GPUBindGroupLayout;
     private readonly renderLayout: GPUBindGroupLayout;
     private readonly computeGroups: [GPUBindGroup, GPUBindGroup];
@@ -165,6 +123,8 @@ class BoidsApp {
     private count = DEFAULT_BOIDS;
     private sortSize = sortSizeFor(DEFAULT_BOIDS);
     private activeA = true;
+    private validationPending = true;
+    private validationInFlight = false;
 
     constructor() {
         const computeEntries: GPUBindGroupLayoutEntry[] = [
@@ -190,7 +150,7 @@ class BoidsApp {
         const computeLayout = device.createPipelineLayout({ bindGroupLayouts: [this.computeLayout] });
         this.computePipelines = Object.fromEntries([
             'initialize', 'assignPairs', 'radixABMap', 'radixBAMap', 'scanBlocks', 'scanBlockSums', 'addBlockSums',
-            'radixABScatter', 'radixBAScatter', 'clearCells', 'buildCellRanges', 'gather', 'update',
+            'radixABScatter', 'radixBAScatter', 'clearCells', 'buildCellRanges', 'gather', 'updateVelocity', 'updatePosition',
         ].map(entry => [entry, device.createComputePipeline({
             label: entry, layout: computeLayout, compute: { module: this.computeShader, entryPoint: entry }
         })]));
@@ -231,7 +191,9 @@ class BoidsApp {
         this.count = count;
         this.sortSize = sortSizeFor(count);
         this.activeA = true;
+        this.validationPending = true;
         boidCounter.textContent = `${count.toLocaleString()} boids`;
+        integrityCounter.textContent = 'Permutation: pending';
         device.queue.writeBuffer(this.settings, 0, new Uint32Array([count, this.sortSize]));
         const encoder = device.createCommandEncoder({ label: 'initialize boids' });
         const pass = encoder.beginComputePass();
@@ -263,8 +225,15 @@ class BoidsApp {
         run('clearCells', Math.ceil(GRID_CELLS / WORKGROUP_SIZE));
         run('buildCellRanges', Math.ceil(this.count / WORKGROUP_SIZE));
         run('gather', Math.ceil(this.count / WORKGROUP_SIZE));
-        run('update', Math.ceil(this.count / WORKGROUP_SIZE));
+        run('updateVelocity', Math.ceil(this.count / WORKGROUP_SIZE));
+        run('updatePosition', Math.ceil(this.count / WORKGROUP_SIZE));
         compute.end();
+        const validateThisFrame = this.validationPending && !this.validationInFlight;
+        if (validateThisFrame) {
+            encoder.copyBufferToBuffer(this.pairsA, 0, this.validationReadback, 0, this.count * 8);
+            this.validationPending = false;
+            this.validationInFlight = true;
+        }
         const render = encoder.beginRenderPass({
             colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }]
         });
@@ -275,7 +244,29 @@ class BoidsApp {
         render.draw(6, this.count);
         render.end();
         device.queue.submit([encoder.finish()]);
+        if (validateThisFrame) this.validatePermutation(this.count);
         this.activeA = !this.activeA;
+    }
+
+    private async validatePermutation(count: number): Promise<void> {
+        await this.validationReadback.mapAsync(GPUMapMode.READ, 0, count * 8);
+        const pairs = new Uint32Array(this.validationReadback.getMappedRange().slice(0));
+        this.validationReadback.unmap();
+        const seen = new Uint8Array(count);
+        let valid = true;
+        for (let i = 0; i < count; i++) {
+            const index = pairs[i * 2 + 1];
+            if (index >= count || seen[index] !== 0) { valid = false; break; }
+            seen[index] = 1;
+        }
+        this.validationInFlight = false;
+        if (count !== this.count) return;
+        integrityCounter.textContent = valid
+            ? `Permutation: ${count.toLocaleString()} / ${count.toLocaleString()} verified`
+            : 'Permutation: INVALID';
+        if (!valid) {
+            throw new Error('Radix sort did not produce a complete boid permutation');
+        }
     }
 }
 
