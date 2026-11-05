@@ -36,7 +36,98 @@ const context = canvas.getContext('webgpu')!;
 const format = navigator.gpu.getPreferredCanvasFormat();
 context.configure({ device, format, alphaMode: 'opaque' });
 
+const cameraBuffer = makeBuffer('camera transform', 64, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+let phi = -0.70;
+let theta = 1.22;
+let zoom = 4.0;
+let dragButton: number | undefined;
+let lastPointerX = 0;
+let lastPointerY = 0;
+
+function cross(a: readonly number[], b: readonly number[]): [number, number, number] {
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+function normalize(v: readonly number[]): [number, number, number] {
+    const length = Math.hypot(v[0], v[1], v[2]);
+    return [v[0] / length, v[1] / length, v[2] / length];
+}
+
+function multiplyMat4(a: Float32Array, b: Float32Array): Float32Array {
+    const output = new Float32Array(16);
+    for (let column = 0; column < 4; column++) {
+        for (let row = 0; row < 4; row++) {
+            output[column * 4 + row] = a[row] * b[column * 4]
+                + a[4 + row] * b[column * 4 + 1]
+                + a[8 + row] * b[column * 4 + 2]
+                + a[12 + row] * b[column * 4 + 3];
+        }
+    }
+    return output;
+}
+
+function updateCamera(): void {
+    const eye: [number, number, number] = [
+        zoom * Math.sin(phi) * Math.sin(theta),
+        zoom * Math.cos(phi) * Math.sin(theta),
+        zoom * Math.cos(theta),
+    ];
+    const forward = normalize(eye);
+    const right = normalize(cross([0, 0, 1], forward));
+    const up = cross(forward, right);
+    const view = new Float32Array([
+        right[0], up[0], forward[0], 0,
+        right[1], up[1], forward[1], 0,
+        right[2], up[2], forward[2], 0,
+        -(right[0] * eye[0] + right[1] * eye[1] + right[2] * eye[2]),
+        -(up[0] * eye[0] + up[1] * eye[1] + up[2] * eye[2]),
+        -(forward[0] * eye[0] + forward[1] * eye[1] + forward[2] * eye[2]),
+        1,
+    ]);
+    const f = 1 / Math.tan(Math.PI / 8);
+    const near = 0.1;
+    const far = 10;
+    const projection = new Float32Array([
+        f / (WIDTH / HEIGHT), 0, 0, 0,
+        0, f, 0, 0,
+        0, 0, (far + near) / (near - far), -1,
+        0, 0, 2 * far * near / (near - far), 0,
+    ]);
+    const viewProjection = multiplyMat4(projection, view);
+    device.queue.writeBuffer(cameraBuffer, 0, viewProjection.buffer as ArrayBuffer);
+}
+
+canvas.addEventListener('contextmenu', event => event.preventDefault());
+canvas.addEventListener('mousedown', event => {
+    if (event.button !== 0 && event.button !== 2) return;
+    dragButton = event.button;
+    lastPointerX = event.clientX;
+    lastPointerY = event.clientY;
+    canvas.style.cursor = 'grabbing';
+});
+window.addEventListener('mouseup', () => {
+    dragButton = undefined;
+    canvas.style.cursor = 'grab';
+});
+window.addEventListener('mousemove', event => {
+    if (dragButton === undefined) return;
+    const bounds = canvas.getBoundingClientRect();
+    const deltaX = (event.clientX - lastPointerX) / bounds.width;
+    const deltaY = (event.clientY - lastPointerY) / bounds.height;
+    if (dragButton === 0) {
+        phi += deltaX;
+        theta = Math.max(0.01, Math.min(Math.PI, theta - deltaY));
+    } else {
+        zoom = Math.max(0.1, Math.min(5.0, zoom + deltaY));
+    }
+    lastPointerX = event.clientX;
+    lastPointerY = event.clientY;
+    updateCamera();
+});
+updateCamera();
+
 const fpsCounter = document.getElementById('fpsCounter')!;
+const boidCounter = document.getElementById('boidCounter')!;
 const controls = { boidCount: DEFAULT_BOIDS };
 const gui = new GUI();
 
@@ -66,7 +157,9 @@ class BoidsApp {
     private readonly cellEnd = makeBuffer('cell ends', GRID_CELLS * 4, GPUBufferUsage.STORAGE);
     private readonly blockSums = makeBuffer('scan block sums', MAX_SCAN_BLOCK_COUNT * 4, GPUBufferUsage.STORAGE);
     private readonly computeLayout: GPUBindGroupLayout;
+    private readonly renderLayout: GPUBindGroupLayout;
     private readonly computeGroups: [GPUBindGroup, GPUBindGroup];
+    private readonly renderGroup: GPUBindGroup;
     private readonly computePipelines: Record<string, GPUComputePipeline>;
     private readonly renderPipeline: GPURenderPipeline;
     private count = DEFAULT_BOIDS;
@@ -85,7 +178,15 @@ class BoidsApp {
             label: 'boids compute layout',
             entries: computeEntries
         });
+        this.renderLayout = device.createBindGroupLayout({
+            label: 'camera layout',
+            entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }]
+        });
         this.computeGroups = [this.makeComputeGroup(this.boidsA, this.boidsB), this.makeComputeGroup(this.boidsB, this.boidsA)];
+        this.renderGroup = device.createBindGroup({
+            label: 'camera bindings', layout: this.renderLayout,
+            entries: [{ binding: 0, resource: { buffer: cameraBuffer } }]
+        });
         const computeLayout = device.createPipelineLayout({ bindGroupLayouts: [this.computeLayout] });
         this.computePipelines = Object.fromEntries([
             'initialize', 'assignPairs', 'radixABMap', 'radixBAMap', 'scanBlocks', 'scanBlockSums', 'addBlockSums',
@@ -95,7 +196,7 @@ class BoidsApp {
         })]));
         this.renderPipeline = device.createRenderPipeline({
             label: 'boid render pipeline',
-            layout: 'auto',
+            layout: device.createPipelineLayout({ bindGroupLayouts: [this.renderLayout] }),
             vertex: {
                 module: this.renderShader,
                 entryPoint: 'vertex',
@@ -130,6 +231,7 @@ class BoidsApp {
         this.count = count;
         this.sortSize = sortSizeFor(count);
         this.activeA = true;
+        boidCounter.textContent = `${count.toLocaleString()} boids`;
         device.queue.writeBuffer(this.settings, 0, new Uint32Array([count, this.sortSize]));
         const encoder = device.createCommandEncoder({ label: 'initialize boids' });
         const pass = encoder.beginComputePass();
@@ -167,7 +269,9 @@ class BoidsApp {
             colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }]
         });
         render.setPipeline(this.renderPipeline);
+        render.setBindGroup(0, this.renderGroup);
         render.setVertexBuffer(0, this.activeA ? this.boidsB : this.boidsA);
+        // Exactly one six-vertex quad is submitted for every requested boid.
         render.draw(6, this.count);
         render.end();
         device.queue.submit([encoder.finish()]);

@@ -178,7 +178,12 @@ fn buildCellRanges(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(256)
 fn gather(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x < settings.count) { sortedBoids[gid.x] = current[pairsA[gid.x].index]; }
+    if (gid.x >= settings.count) { return; }
+    // A valid radix permutation always has an in-range source index. Keeping
+    // the unsorted element as a fallback prevents an invalid key from ever
+    // producing an off-screen/undefined vertex.
+    let sourceIndex = pairsA[gid.x].index;
+    sortedBoids[gid.x] = current[select(gid.x, sourceIndex, sourceIndex < settings.count)];
 }
 
 fn addNeighbor(boidIndex: u32, neighbor: u32, position: vec3<f32>, center: ptr<function, vec3<f32>>, count1: ptr<function, u32>, separation: ptr<function, vec3<f32>>, velocity: ptr<function, vec3<f32>>, count3: ptr<function, u32>) {
