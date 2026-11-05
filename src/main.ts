@@ -75,6 +75,38 @@ window.addEventListener('mousemove', event => {
     lastPointerY = event.clientY;
     updateCamera();
 });
+let lastTouchDistance = 0;
+canvas.addEventListener('touchstart', event => {
+    event.preventDefault();
+    if (event.touches.length === 1) {
+        lastPointerX = event.touches[0].clientX;
+        lastPointerY = event.touches[0].clientY;
+    } else if (event.touches.length === 2) {
+        lastTouchDistance = Math.hypot(
+            event.touches[0].clientX - event.touches[1].clientX,
+            event.touches[0].clientY - event.touches[1].clientY,
+        );
+    }
+}, { passive: false });
+canvas.addEventListener('touchmove', event => {
+    event.preventDefault();
+    const bounds = canvas.getBoundingClientRect();
+    if (event.touches.length === 1) {
+        const touch = event.touches[0];
+        phi += (touch.clientX - lastPointerX) / bounds.width;
+        theta = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, theta - (touch.clientY - lastPointerY) / bounds.height));
+        lastPointerX = touch.clientX;
+        lastPointerY = touch.clientY;
+    } else if (event.touches.length === 2) {
+        const distance = Math.hypot(
+            event.touches[0].clientX - event.touches[1].clientX,
+            event.touches[0].clientY - event.touches[1].clientY,
+        );
+        zoom = Math.max(0.25, Math.min(12.0, zoom - (distance - lastTouchDistance) * 0.015));
+        lastTouchDistance = distance;
+    }
+    updateCamera();
+}, { passive: false });
 canvas.addEventListener('wheel', event => {
     event.preventDefault();
     zoom = Math.max(0.25, Math.min(12.0, zoom + event.deltaY * 0.003));
@@ -150,7 +182,7 @@ class BoidsApp {
         const computeLayout = device.createPipelineLayout({ bindGroupLayouts: [this.computeLayout] });
         this.computePipelines = Object.fromEntries([
             'initialize', 'assignPairs', 'radixABMap', 'radixBAMap', 'scanBlocks', 'scanBlockSums', 'addBlockSums',
-            'radixABScatter', 'radixBAScatter', 'clearCells', 'buildCellRanges', 'gather', 'updateVelocity', 'updatePosition',
+            'radixABScatter', 'radixBAScatter', 'clearCells', 'buildCellRanges', 'gather', 'update',
         ].map(entry => [entry, device.createComputePipeline({
             label: entry, layout: computeLayout, compute: { module: this.computeShader, entryPoint: entry }
         })]));
@@ -225,8 +257,7 @@ class BoidsApp {
         run('clearCells', Math.ceil(GRID_CELLS / WORKGROUP_SIZE));
         run('buildCellRanges', Math.ceil(this.count / WORKGROUP_SIZE));
         run('gather', Math.ceil(this.count / WORKGROUP_SIZE));
-        run('updateVelocity', Math.ceil(this.count / WORKGROUP_SIZE));
-        run('updatePosition', Math.ceil(this.count / WORKGROUP_SIZE));
+        run('update', Math.ceil(this.count / WORKGROUP_SIZE));
         compute.end();
         const validateThisFrame = this.validationPending && !this.validationInFlight;
         if (validateThisFrame) {

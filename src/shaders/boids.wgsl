@@ -197,7 +197,7 @@ fn addNeighbor(boidIndex: u32, neighbor: u32, position: vec3<f32>, center: ptr<f
 }
 
 @compute @workgroup_size(256)
-fn updateVelocity(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn update(@builtin(global_invocation_id) gid: vec3<u32>) {
     let index = gid.x;
     if (index >= settings.count) { return; }
     let boid = sortedBoids[index];
@@ -232,17 +232,9 @@ fn updateVelocity(@builtin(global_invocation_id) gid: vec3<u32>) {
     var velocity = boid.velocity.xyz + rule1 + rule2 + rule3;
     let speed = length(velocity);
     if (speed > 1.0) { velocity = velocity / speed; }
-    next[index] = Boid(vec4<f32>(position, 1.0), vec4<f32>(velocity, 0.0));
-}
-
-@compute @workgroup_size(256)
-fn updatePosition(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let index = gid.x;
-    if (index >= settings.count) { return; }
-    let velocity = next[index].velocity.xyz;
-    var newPosition = next[index].position.xyz + velocity * 0.2;
+    var newPosition = position + velocity * 0.2;
     newPosition = select(newPosition, vec3<f32>(SCENE_SCALE), newPosition < vec3<f32>(-SCENE_SCALE));
     newPosition = select(newPosition, vec3<f32>(-SCENE_SCALE), newPosition > vec3<f32>(SCENE_SCALE));
-    next[index].position = vec4<f32>(newPosition, 1.0);
+    next[index] = Boid(vec4<f32>(newPosition, 1.0), vec4<f32>(velocity, 0.0));
 }
 

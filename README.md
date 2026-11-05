@@ -4,4 +4,4 @@ A fixed-camera WebGPU port of the coherent-grid CUDA flocking simulation. It use
 
 Run `npm install` and `npm run dev`. The upper-right control changes the boid count (1–100,000); the upper-left counter reports FPS. Vite listens on your LAN at port 5173.
 
-Use left-drag to orbit, right-drag to zoom, or the mouse wheel to zoom.
+Use left-drag to orbit, right-drag or the mouse wheel to zoom. On touch devices, drag one finger to orbit and pinch with two fingers to zoom.
